@@ -2,6 +2,10 @@
 
 This repo now has the V1 control-plane tools for the Qwen2.5 two-node V100 setup.
 
+## Progress Tracking
+
+Track current research status, evidence, and next actions in `/home/liu.shu/knowledge-vault/02-research/2026-05-20-qwen25-vllm-qwen-code-tools/index.md`.
+
 ## 1. Discover Slurm Endpoints
 
 Run inside the active two-node Slurm allocation:
