@@ -137,6 +137,20 @@ Artifacts:
 - `summary.json`: stable machine-readable status, including `schema_version`, `failure_class`, `failure_reasons`, command result summaries, changed paths, disallowed paths, test results, and patch hash.
 - `workspace/`: isolated workspace containing generated changes.
 
+Inspect recent worker runs from the registry:
+
+```bash
+scripts/inspect_worker_runs.py --artifact-root /tmp/hybrid_agent_tasks --limit 10
+```
+
+Show the review details for a specific artifact directory:
+
+```bash
+scripts/inspect_worker_runs.py --show /tmp/hybrid_agent_tasks/20260521T120000Z
+```
+
+For automation, add `--json` to either command.
+
 Timeout cleanup note: worker subprocesses must run in their own process group.
 If only the parent Qwen Code process is killed on timeout, child processes can
 keep inherited stdout/stderr pipes open, causing `proc.communicate()` to keep
