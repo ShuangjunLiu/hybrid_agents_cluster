@@ -40,6 +40,35 @@ def tool_payload(name, content, arguments="{}"):
     }
 
 
+def edit_history_payload(results):
+    messages = []
+    for index, content in enumerate(results, start=1):
+        call_id = "call_{}".format(index)
+        messages.extend(
+            [
+                {
+                    "role": "assistant",
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": "edit",
+                                "arguments": '{"file_path":"docs/file_%s.md"}' % index,
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "content": content,
+                },
+            ]
+        )
+    return {"messages": messages}
+
+
 def assert_equal(name, actual, expected):
     if actual != expected:
         raise AssertionError("{}: expected {}, got {}".format(name, expected, actual))
@@ -51,6 +80,31 @@ def main():
     stop_tools = proxy.DEFAULT_STOP_AFTER_TOOLS
 
     cases = [
+        (
+            "multi-file edit history stops after first success",
+            edit_history_payload(
+                [
+                    "File updated successfully.",
+                    "File updated successfully.",
+                ]
+            ),
+            True,
+        ),
+        (
+            "failed edit followed by retry stops after retry success",
+            edit_history_payload(
+                [
+                    "Error: file has not been read.",
+                    "File updated successfully.",
+                ]
+            ),
+            True,
+        ),
+        (
+            "failed edit without retry does not stop injection",
+            edit_history_payload(["Error: file has not been read."]),
+            False,
+        ),
         (
             "edit success stops injection",
             tool_payload("edit", "File updated successfully."),
@@ -116,11 +170,27 @@ def main():
         "mutating shell history disables required tool_choice injection",
         proxy.should_inject_tool_choice(
             "/v1/chat/completions",
-            injection_payload,
+            {
+                "tools": [{"type": "function", "function": {"name": "edit"}}],
+                "messages": cases[6][1]["messages"],
+            },
             "required",
             stop_tools,
         ),
         False,
+    )
+    assert_equal(
+        "failed edit history keeps required tool_choice injection",
+        proxy.should_inject_tool_choice(
+            "/v1/chat/completions",
+            {
+                "tools": [{"type": "function", "function": {"name": "edit"}}],
+                "messages": cases[2][1]["messages"],
+            },
+            "required",
+            stop_tools,
+        ),
+        True,
     )
     return 0
 

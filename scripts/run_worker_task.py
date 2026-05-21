@@ -50,6 +50,7 @@ PROXY_ENV_VARS = [
 
 
 SUMMARY_SCHEMA_VERSION = 1
+DEFAULT_RUN_REGISTRY_NAME = "runs.jsonl"
 
 
 def utc_now():
@@ -120,6 +121,12 @@ def run(cmd, cwd=None, env=None, timeout=None):
         "duration_seconds": round(time.monotonic() - start_monotonic, 3),
         "process_group": True,
     }
+
+
+def git_has_uncommitted_tracked_changes(path):
+    unstaged = run(["git", "-C", path, "diff", "--quiet", "--no-ext-diff"])
+    staged = run(["git", "-C", path, "diff", "--cached", "--quiet", "--no-ext-diff"])
+    return unstaged["returncode"] != 0 or staged["returncode"] != 0
 
 
 def command_result_summary(result):
@@ -323,35 +330,72 @@ def build_replay_command(args, script_path):
         script_path,
         "--repo",
         os.path.abspath(args.repo),
-        "--endpoint",
-        args.endpoint.rstrip("/"),
-        "--qwen-bin",
-        args.qwen_bin,
-        "--approval-mode",
-        args.approval_mode,
-        "--output-format",
-        args.output_format,
-        "--timeout",
-        str(args.timeout),
-        "--model-timeout",
-        str(args.model_timeout),
-        "--qwen-max-output-tokens",
-        str(args.effective_qwen_max_output_tokens),
     ]
-    if args.model:
-        command.extend(["--model", args.model])
     if args.task:
+        command.extend(
+            [
+                "--endpoint",
+                args.endpoint.rstrip("/"),
+                "--qwen-bin",
+                args.qwen_bin,
+                "--approval-mode",
+                args.approval_mode,
+                "--output-format",
+                args.output_format,
+                "--timeout",
+                str(args.timeout),
+                "--model-timeout",
+                str(args.model_timeout),
+                "--qwen-max-output-tokens",
+                str(args.effective_qwen_max_output_tokens),
+            ]
+        )
+        if args.model:
+            command.extend(["--model", args.model])
         command.extend(["--task", args.task])
-    if args.task_file:
+    elif args.task_file:
+        command.extend(
+            [
+                "--endpoint",
+                args.endpoint.rstrip("/"),
+                "--qwen-bin",
+                args.qwen_bin,
+                "--approval-mode",
+                args.approval_mode,
+                "--output-format",
+                args.output_format,
+                "--timeout",
+                str(args.timeout),
+                "--model-timeout",
+                str(args.model_timeout),
+                "--qwen-max-output-tokens",
+                str(args.effective_qwen_max_output_tokens),
+            ]
+        )
+        if args.model:
+            command.extend(["--model", args.model])
         command.extend(["--task-file", args.task_file])
+    elif args.review_patch:
+        command.extend(["--review-patch", os.path.abspath(args.review_patch)])
     for allowed_path_pattern in args.allowed_path:
         command.extend(["--allowed-path", allowed_path_pattern])
     for test_command in args.test_command:
         command.extend(["--test-command", test_command])
+    if args.apply:
+        command.append("--apply")
+    if args.allow_dirty_apply:
+        command.append("--allow-dirty-apply")
     return "OPENAI_API_KEY=${OPENAI_API_KEY:-EMPTY} " + shell_join(command)
 
 
-def classify_failure(qwen_result, test_results, disallowed_paths, apply_result, setup_error=None):
+def classify_failure(
+    qwen_result,
+    test_results,
+    disallowed_paths,
+    apply_result,
+    patch_text,
+    setup_error=None,
+):
     if setup_error:
         return "setup_error"
     if qwen_result and qwen_result["timeout_occurred"]:
@@ -362,15 +406,27 @@ def classify_failure(qwen_result, test_results, disallowed_paths, apply_result, 
         return "patch_disallowed_paths"
     if any(result["returncode"] != 0 for result in test_results):
         return "tests_failed"
+    if patch_text == "":
+        return "empty_patch"
     if apply_result and apply_result.get("returncode") != 0:
-        return "apply_failed"
+        return apply_result.get("failure_class") or "apply_failed"
     return None
 
 
-def failure_reasons(failure_class, qwen_result, test_results, disallowed_paths, apply_result, setup_error=None):
+def failure_reasons(
+    failure_class,
+    qwen_result,
+    test_results,
+    disallowed_paths,
+    apply_result,
+    patch_text,
+    setup_error=None,
+):
     reasons = []
     if setup_error:
         reasons.append(str(setup_error))
+    if patch_text == "":
+        reasons.append("Patch is empty.")
     if qwen_result and qwen_result["timeout_occurred"]:
         reasons.append("Qwen Code timed out after {} seconds and the runner terminated its process group.".format(qwen_result["timeout_seconds"]))
     elif qwen_result and qwen_result["returncode"] != 0:
@@ -394,17 +450,60 @@ def review_patch(patch_text, allowed_patterns):
     return changed_paths, disallowed
 
 
-def apply_patch_to_repo(repo, patch_text, artifact_dir):
+def blocked_apply_result(failure_class, stderr):
+    return {
+        "returncode": 1,
+        "failure_class": failure_class,
+        "stderr": stderr,
+    }
+
+
+def apply_patch_to_repo(repo, patch_text, artifact_dir, allow_dirty_apply=False):
+    if patch_text == "":
+        return blocked_apply_result("empty_patch", "Refused to apply an empty patch.")
+    if is_git_repo(repo) and not allow_dirty_apply and git_has_uncommitted_tracked_changes(repo):
+        return blocked_apply_result(
+            "dirty_repo",
+            "Refused to apply patch because --repo has uncommitted tracked changes. Pass --allow-dirty-apply to override.",
+        )
     patch_path = os.path.join(artifact_dir, "diff.patch")
     check_result = run(["git", "-C", repo, "apply", "--check", patch_path])
     if check_result["returncode"] != 0:
-        return command_result_summary(check_result)
+        summary = command_result_summary(check_result)
+        summary["failure_class"] = "apply_check_conflict"
+        return summary
     apply_result = run(["git", "-C", repo, "apply", patch_path])
-    return command_result_summary(apply_result)
+    summary = command_result_summary(apply_result)
+    if summary["returncode"] != 0:
+        summary["failure_class"] = "apply_failed"
+    return summary
 
 
 def write_json(path, payload):
     write_file(path, json.dumps(payload, indent=2, sort_keys=True) + "\n")
+
+
+def append_run_registry(path, summary, replay_command):
+    if not path:
+        return
+    record = {
+        "timestamp": utc_now(),
+        "artifact_dir": summary.get("artifact_dir"),
+        "repo": summary.get("repo"),
+        "endpoint": summary.get("endpoint"),
+        "model": summary.get("model"),
+        "mode": summary.get("mode"),
+        "ok": summary.get("ok"),
+        "failure_class": summary.get("failure_class"),
+        "changed_paths": summary.get("changed_paths") or [],
+        "patch_sha256": summary.get("patch_sha256"),
+        "apply_requested": summary.get("apply_requested"),
+        "apply_result": summary.get("apply_result"),
+        "replay_command": replay_command,
+    }
+    os.makedirs(os.path.dirname(os.path.abspath(path)), exist_ok=True)
+    with open(path, "a") as handle:
+        handle.write(json.dumps(record, sort_keys=True) + "\n")
 
 
 def main(argv=None):
@@ -424,8 +523,17 @@ def main(argv=None):
     parser.add_argument("--test-command", action="append", default=[])
     parser.add_argument("--apply", action="store_true", help="Apply the generated/reviewed patch to --repo after all review gates pass.")
     parser.add_argument(
+        "--allow-dirty-apply",
+        action="store_true",
+        help="Allow --apply when --repo has uncommitted tracked changes.",
+    )
+    parser.add_argument(
         "--artifact-root",
         default=os.path.join(tempfile.gettempdir(), "hybrid_agent_tasks"),
+    )
+    parser.add_argument(
+        "--run-registry",
+        help="Append one JSONL run record here. Defaults to ARTIFACT_ROOT/runs.jsonl.",
     )
     parser.add_argument("--timeout", type=int, default=1800)
     parser.add_argument("--model-timeout", type=int, default=20)
@@ -442,6 +550,9 @@ def main(argv=None):
     ) = resolve_qwen_max_output_tokens(args, base_env)
 
     repo = os.path.abspath(args.repo)
+    args.artifact_root = os.path.abspath(args.artifact_root)
+    if args.run_registry is None:
+        args.run_registry = os.path.join(args.artifact_root, DEFAULT_RUN_REGISTRY_NAME)
     if not os.path.isdir(repo):
         print("Repo path does not exist or is not a directory: {}".format(repo), file=sys.stderr)
         return 2
@@ -459,27 +570,35 @@ def main(argv=None):
     workspace = os.path.join(artifact_dir, "workspace")
     before = os.path.join(artifact_dir, "before")
     script_path = os.path.abspath(sys.argv[0])
+    replay_command = build_replay_command(args, script_path)
 
     if args.review_patch:
         patch_text = read_file(args.review_patch)
         write_file(os.path.join(artifact_dir, "diff.patch"), patch_text)
         changed_paths, disallowed = review_patch(patch_text, args.allowed_path)
         apply_result = None
-        if args.apply and not disallowed:
-            apply_result = apply_patch_to_repo(repo, patch_text, artifact_dir)
+        if args.apply and not disallowed and patch_text != "":
+            apply_result = apply_patch_to_repo(
+                repo,
+                patch_text,
+                artifact_dir,
+                allow_dirty_apply=args.allow_dirty_apply,
+            )
         elif args.apply and disallowed:
-            apply_result = {
-                "returncode": 1,
-                "stderr": "Refused to apply patch with disallowed paths.",
-            }
-        failure_class = classify_failure(None, [], disallowed, apply_result)
+            apply_result = blocked_apply_result(
+                "patch_disallowed_paths",
+                "Refused to apply patch with disallowed paths.",
+            )
+        elif args.apply and patch_text == "":
+            apply_result = blocked_apply_result("empty_patch", "Refused to apply an empty patch.")
+        failure_class = classify_failure(None, [], disallowed, apply_result, patch_text)
         ok = failure_class is None
         summary = {
             "schema_version": SUMMARY_SCHEMA_VERSION,
             "ok": ok,
             "mode": "review_patch",
             "failure_class": failure_class,
-            "failure_reasons": failure_reasons(failure_class, None, [], disallowed, apply_result),
+            "failure_reasons": failure_reasons(failure_class, None, [], disallowed, apply_result, patch_text),
             "artifact_dir": artifact_dir,
             "workspace": None,
             "repo": repo,
@@ -494,8 +613,11 @@ def main(argv=None):
             "patch_sha256": sha256_text(patch_text),
             "apply_requested": args.apply,
             "apply_result": apply_result,
+            "replay_command": replay_command,
+            "run_registry": args.run_registry,
         }
         write_json(os.path.join(artifact_dir, "summary.json"), summary)
+        append_run_registry(args.run_registry, summary, replay_command)
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 0 if ok else 1
 
@@ -516,7 +638,7 @@ def main(argv=None):
         "approval_mode": args.approval_mode,
         "output_format": args.output_format,
         "apply_requested": args.apply,
-        "replay_command": build_replay_command(args, script_path),
+        "replay_command": replay_command,
     }
 
     use_git = is_git_repo(repo)
@@ -539,7 +661,7 @@ def main(argv=None):
             "ok": False,
             "mode": "run_worker",
             "failure_class": "setup_error",
-            "failure_reasons": failure_reasons("setup_error", None, [], [], None, exc),
+            "failure_reasons": failure_reasons("setup_error", None, [], [], None, None, exc),
             "artifact_dir": artifact_dir,
             "workspace": workspace,
             "repo": repo,
@@ -556,10 +678,13 @@ def main(argv=None):
             "patch_sha256": None,
             "apply_requested": args.apply,
             "apply_result": None,
+            "replay_command": replay_command,
+            "run_registry": args.run_registry,
         }
         metadata["setup_error"] = str(exc)
         write_json(os.path.join(artifact_dir, "run_metadata.json"), metadata)
         write_json(os.path.join(artifact_dir, "summary.json"), summary)
+        append_run_registry(args.run_registry, summary, replay_command)
         print(json.dumps(summary, indent=2, sort_keys=True))
         return 1
     metadata["model"] = model
@@ -602,14 +727,25 @@ def main(argv=None):
 
     changed_paths, disallowed = review_patch(patch_text, args.allowed_path)
     apply_result = None
-    if args.apply and qwen_result["returncode"] == 0 and not disallowed and all(result["returncode"] == 0 for result in test_results):
-        apply_result = apply_patch_to_repo(repo, patch_text, artifact_dir)
+    if (
+        args.apply
+        and qwen_result["returncode"] == 0
+        and not disallowed
+        and patch_text != ""
+        and all(result["returncode"] == 0 for result in test_results)
+    ):
+        apply_result = apply_patch_to_repo(
+            repo,
+            patch_text,
+            artifact_dir,
+            allow_dirty_apply=args.allow_dirty_apply,
+        )
     elif args.apply:
-        apply_result = {
-            "returncode": 1,
-            "stderr": "Refused to apply patch because one or more review gates failed.",
-        }
-    failure_class = classify_failure(qwen_result, test_results, disallowed, apply_result)
+        apply_result = blocked_apply_result(
+            "review_gate_failed",
+            "Refused to apply patch because one or more review gates failed.",
+        )
+    failure_class = classify_failure(qwen_result, test_results, disallowed, apply_result, patch_text)
     ok = failure_class is None
 
     summary = {
@@ -617,7 +753,7 @@ def main(argv=None):
         "ok": ok,
         "mode": "run_worker",
         "failure_class": failure_class,
-        "failure_reasons": failure_reasons(failure_class, qwen_result, test_results, disallowed, apply_result),
+        "failure_reasons": failure_reasons(failure_class, qwen_result, test_results, disallowed, apply_result, patch_text),
         "artifact_dir": artifact_dir,
         "workspace": workspace,
         "repo": repo,
@@ -635,8 +771,11 @@ def main(argv=None):
         "patch_sha256": sha256_text(patch_text),
         "apply_requested": args.apply,
         "apply_result": apply_result,
+        "replay_command": replay_command,
+        "run_registry": args.run_registry,
     }
     write_json(os.path.join(artifact_dir, "summary.json"), summary)
+    append_run_registry(args.run_registry, summary, replay_command)
     print(json.dumps(summary, indent=2, sort_keys=True))
     return 0 if ok else 1
 

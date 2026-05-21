@@ -99,19 +99,11 @@ validate vLLM, then run the live worker smoke:
 
 ```bash
 $HYBRID_AGENTS_REPO_ROOT/scripts/check_proxy_stop_conditions.py
+$HYBRID_AGENTS_REPO_ROOT/scripts/check_worker_runner_review_apply.py
 $HYBRID_AGENTS_REPO_ROOT/scripts/validate_vllm_endpoints.py --timeout 60 --expected-max-model-len 16384 --json
 WORKER_NODE="${WORKER_NODE:-$(scontrol show hostnames "$SLURM_JOB_NODELIST" | sed -n '2p')}"
-$HYBRID_AGENTS_REPO_ROOT/scripts/openai_tool_choice_proxy.py \
-  --listen-port 18012 \
-  --upstream "http://$WORKER_NODE:8012" &
-PROXY_PID=$!
-trap 'kill "$PROXY_PID" 2>/dev/null || true' EXIT
-until curl --noproxy "*" -fsS --max-time 5 http://127.0.0.1:18012/v1/models >/dev/null; do
-  sleep 1
-done
+WORKER_NODE="$WORKER_NODE" $HYBRID_AGENTS_REPO_ROOT/scripts/start_worker_tool_proxy.sh
 ENDPOINT=http://127.0.0.1:18012/v1 $HYBRID_AGENTS_REPO_ROOT/scripts/smoke_single_worker_gate.sh
-kill "$PROXY_PID" 2>/dev/null || true
-trap - EXIT
 ```
 
 The smoke gate requires `summary.json` to report `ok: true`, `qwen_returncode: 0`,
@@ -123,7 +115,7 @@ reports `ok: true`, and no request times out.
 
 ## 4. Run One Isolated Worker Task
 
-The worker runner never edits the target repo directly. It creates an isolated workspace, runs Qwen Code there, then writes artifacts under `/tmp/hybrid_agent_tasks` by default.
+The worker runner never edits the target repo directly. It creates an isolated workspace, runs Qwen Code there, then writes artifacts under `/tmp/hybrid_agent_tasks` by default. Each worker run or patch review also appends one JSONL registry record to `/tmp/hybrid_agent_tasks/runs.jsonl` unless `--run-registry` overrides it.
 
 ```bash
 scripts/run_worker_task.py \
@@ -193,7 +185,9 @@ scripts/run_worker_task.py \
 
 To apply a generated or reviewed patch automatically, pass `--apply`. The runner refuses
 to apply when Qwen Code failed or timed out, a test command failed, a changed path is not
-allowed, or `git apply --check` fails.
+allowed, the patch is empty, the target repo has uncommitted tracked changes, or
+`git apply --check` fails. Use `--allow-dirty-apply` only when the dirty tracked state is
+intentional and already understood.
 
 ## Current Compatibility Note
 
@@ -255,6 +249,13 @@ Then point Qwen Code or the worker runner at:
 
 ```text
 http://127.0.0.1:18011/v1
+```
+
+For the standard worker path, prefer the startup helper. It starts the proxy, waits for
+`/v1/models`, writes a pid and log under `/tmp/$USER`, and prints the endpoint value:
+
+```bash
+WORKER_NODE=d1011 scripts/start_worker_tool_proxy.sh
 ```
 
 The proxy only rewrites `/v1/chat/completions` JSON requests that contain `tools` and do not already set `tool_choice`.

@@ -325,13 +325,8 @@ srun --nodes=1 \
     echo "Smoke checks:"
     echo "  $HA_REPO_ROOT/scripts/validate_vllm_endpoints.py --timeout 60 --expected-max-model-len 16384 --json"
     echo "  $HA_REPO_ROOT/scripts/check_proxy_stop_conditions.py"
-    echo "  $HA_REPO_ROOT/scripts/openai_tool_choice_proxy.py --listen-port 18012 --upstream http://$HA_WORKER_NODE:$HA_PORT_B &"
-    echo "  PROXY_PID=\$!"
-    echo "  trap \"kill \$PROXY_PID 2>/dev/null || true\" EXIT"
-    echo "  until curl --noproxy \"*\" -fsS --max-time 5 http://127.0.0.1:18012/v1/models >/dev/null; do sleep 1; done"
+    echo "  WORKER_NODE=$HA_WORKER_NODE $HA_REPO_ROOT/scripts/start_worker_tool_proxy.sh"
     echo "  ENDPOINT=http://127.0.0.1:18012/v1 $HA_REPO_ROOT/scripts/smoke_single_worker_gate.sh"
-    echo "  kill \"\$PROXY_PID\" 2>/dev/null || true"
-    echo "  trap - EXIT"
     echo ""
     exec bash
 '
