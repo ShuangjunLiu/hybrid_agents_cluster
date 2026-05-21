@@ -47,6 +47,7 @@ export TORCH_HOME="${TORCH_HOME:-$MODEL_CACHE_ROOT/torch}"
 export VLLM_CACHE_ROOT="${VLLM_CACHE_ROOT:-$MODEL_CACHE_ROOT/vllm}"
 export XDG_CACHE_HOME="${XDG_CACHE_HOME:-$MODEL_CACHE_ROOT/cache}"
 export TMPDIR="${TMPDIR:-$MODEL_CACHE_ROOT/tmp}"
+export OUTLINES_CACHE_DIR="${OUTLINES_CACHE_DIR:-/tmp/$USER/outlines-cache-${SLURM_JOB_ID:-manual}-$NODE-$PORT}"
 export VLLM_CPU_BIND=none
 export OPENAI_BASE_URL="http://127.0.0.1:$PORT/v1"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-EMPTY}"
@@ -60,7 +61,7 @@ if [[ "${USE_EXPLORER_PROXY:-1}" == "1" ]]; then
 fi
 
 mkdir -p "$HF_HOME" "$HUGGINGFACE_HUB_CACHE" "$TRANSFORMERS_CACHE" "$HF_DATASETS_CACHE" \
-         "$TORCH_HOME" "$VLLM_CACHE_ROOT" "$XDG_CACHE_HOME" "$TMPDIR"
+         "$TORCH_HOME" "$VLLM_CACHE_ROOT" "$XDG_CACHE_HOME" "$TMPDIR" "$OUTLINES_CACHE_DIR"
 
 LOG_ROOT="${LOG_ROOT:-/projects/aclab/liu.shu/model-cache}"
 OUT_LOG="$LOG_ROOT/qwen25_a100_${JOBID}_${NODE}_${PORT}.out"
@@ -74,6 +75,7 @@ MODEL=$MODEL
 PORT=$PORT
 OPENAI_BASE_URL=$OPENAI_BASE_URL
 MAX_MODEL_LEN=$MAX_MODEL_LEN
+OUTLINES_CACHE_DIR=$OUTLINES_CACHE_DIR
 OUT_LOG=$OUT_LOG
 ERR_LOG=$ERR_LOG
 EOF
@@ -86,6 +88,7 @@ echo "vLLM Python: $VLLM_PYTHON"
 echo "VLLM_USE_V1: $VLLM_USE_V1"
 echo "Endpoint: $OPENAI_BASE_URL"
 echo "Max model length: $MAX_MODEL_LEN"
+echo "Outlines cache: $OUTLINES_CACHE_DIR"
 echo "Explorer proxy for model download: ${USE_EXPLORER_PROXY:-1}"
 echo "Logs:"
 echo "  $OUT_LOG"

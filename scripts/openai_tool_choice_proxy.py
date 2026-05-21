@@ -22,7 +22,26 @@ HOP_BY_HOP_HEADERS = {
 }
 
 CONTENT_HEADERS = {"content-length", "content-encoding"}
-DEFAULT_STOP_AFTER_TOOLS = ("edit", "write_file")
+DEFAULT_STOP_AFTER_TOOLS = ("edit", "write_file", "run_shell_command")
+MUTATING_SHELL_MARKERS = (
+    ">",
+    ">>",
+    "cat <<",
+    "chmod ",
+    "cp ",
+    "ed ",
+    "git apply",
+    "install ",
+    "mkdir ",
+    "mv ",
+    "perl -",
+    "python ",
+    "python3 ",
+    "rm ",
+    "sed -i",
+    "tee ",
+    "touch ",
+)
 
 
 def normalize_base_url(url):
@@ -43,7 +62,27 @@ def normalize_tool_content(content):
     return ""
 
 
-def tool_result_looks_successful(tool_name, content):
+def parse_tool_arguments(function):
+    arguments = function.get("arguments")
+    if isinstance(arguments, dict):
+        return arguments
+    if isinstance(arguments, str):
+        try:
+            parsed = json.loads(arguments)
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def command_looks_mutating(command):
+    normalized = " ".join(command.strip().split()).lower()
+    if not normalized:
+        return False
+    return any(marker in normalized for marker in MUTATING_SHELL_MARKERS)
+
+
+def tool_result_looks_successful(tool_name, content, arguments=None):
     text = normalize_tool_content(content)
     lower = text.lower()
     if not text:
@@ -53,15 +92,24 @@ def tool_result_looks_successful(tool_name, content):
         "failed",
         "not been read",
         "cannot",
-        "command:",
         "exit code:",
     )
     if any(marker in lower for marker in failure_markers):
         return False
     if tool_name == "edit":
-        return "updated" in lower or "modified" in lower or "replaced" in lower
+        return (
+            "created" in lower
+            or "updated" in lower
+            or "modified" in lower
+            or "replaced" in lower
+        )
     if tool_name == "write_file":
         return "written" in lower or "created" in lower or "updated" in lower
+    if tool_name == "run_shell_command":
+        arguments = arguments or {}
+        command = arguments.get("command", "")
+        if not isinstance(command, str) or not command_looks_mutating(command):
+            return False
     return True
 
 
@@ -73,7 +121,7 @@ def has_successful_stop_tool_result(payload, stop_after_tools):
     if not isinstance(messages, list):
         return False
 
-    call_names = {}
+    call_info = {}
     for message in messages:
         if not isinstance(message, dict):
             continue
@@ -85,10 +133,17 @@ def has_successful_stop_tool_result(payload, stop_after_tools):
                 name = function.get("name")
                 call_id = tool_call.get("id")
                 if name in stop_after_tools and call_id:
-                    call_names[call_id] = name
+                    call_info[call_id] = {
+                        "name": name,
+                        "arguments": parse_tool_arguments(function),
+                    }
         elif message.get("role") == "tool":
-            name = call_names.get(message.get("tool_call_id"))
-            if name and tool_result_looks_successful(name, message.get("content")):
+            info = call_info.get(message.get("tool_call_id"))
+            if info and tool_result_looks_successful(
+                info["name"],
+                message.get("content"),
+                info.get("arguments"),
+            ):
                 return True
     return False
 

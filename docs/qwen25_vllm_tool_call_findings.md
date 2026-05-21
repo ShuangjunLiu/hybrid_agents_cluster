@@ -138,6 +138,8 @@ Two additional proxy behaviors were needed:
 1. vLLM streaming tool-call chunks sometimes ended without a non-null `finish_reason`, causing Qwen Code to fail with `Model stream ended without a finish reason`. The proxy now inserts a final streaming chunk with `finish_reason: "tool_calls"` when tool-call deltas are present and no finish reason is emitted.
 2. Forcing `tool_choice: "required"` on every turn caused post-edit loops, including unnecessary verification tool calls after the file was already updated. The proxy now stops injecting `tool_choice` after a successful mutating tool result from `edit` or `write_file`.
 
+Lesson learned: `tool_choice: "required"` is necessary for Qwen2.5-Coder/vLLM tool-call reliability, but it must be paired with stop conditions so Qwen Code can exit after a successful edit. The first worker smoke created `docs/worker_runner_smoke.md` correctly, then hit `qwen_timeout` because the proxy kept forcing tool calls after the edit. The root cause was that Qwen Code reports successful new-file edits as `Created new file: ...`; the proxy only recognized edit-success wording and did not treat `created` as a mutating success marker. Stop-condition detection should treat `created`, `updated`, `modified`, and `replaced` as successful `edit` outcomes, so a new file creation stops the post-edit loop just like an in-place replacement.
+
 Clean retest result:
 
 ```text
@@ -158,3 +160,27 @@ POST /v1/chat/completions 200
 ```
 
 The last request had no injection, allowing Qwen Code to produce the final answer and exit.
+
+## Worker Node Cache-Locking Failure
+
+A later worker-node probe reached vLLM and exercised guided decoding, but failed inside
+Outlines' disk-backed cache with:
+
+```text
+sqlite3.OperationalError: locking protocol
+```
+
+That failure was cache-locking specific, not basic worker connectivity and not a missing
+vLLM tool parser. In the inspected Outlines version, `XDG_CACHE_HOME` was not enough to
+move this cache because Outlines used its own default cache path under
+`~/.cache/outlines`.
+
+The two-node launchers now set `OUTLINES_CACHE_DIR` by default to a node-local path:
+
+```text
+/tmp/$USER/outlines-cache-${SLURM_JOB_ID:-manual}-$(hostname -s)-$PORT
+```
+
+Tool-call guided decoding should keep this cache on node-local storage for SQLite locking
+behavior. Advanced callers may override `OUTLINES_CACHE_DIR` explicitly when they need a
+different cache location.
