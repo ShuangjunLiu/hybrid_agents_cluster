@@ -1,15 +1,22 @@
 # Hybrid Coding V1 Usage
 
-This repo now has the V1 control-plane tools for the Qwen2.5 two-node V100 setup.
-Use the 7B, 2-node, 1x V100-per-node topology for day-to-day development and smoke
-debugging. Keep the 32B, 2-node, 4x V100-per-node topology for scale-up and final
-validation.
+This repo has V1 control-plane tools for local V100-backed coding helpers. The
+production helper path is now direct generation through `scripts/hybrid-worker`:
+Codex/GPT-5.5 remains the planner, reviewer, and final integrator, while the local
+model returns complete file content inside an isolated workspace. See
+`docs/hybrid_worker_direct_generation.md` for the Codex-facing command and artifact
+contract.
+
+Use the 7B, 2-node, 1x V100-per-node topology for the default direct-generation
+baseline. Keep Qwen Code, the tool-choice proxy, OpenHands, and OpenCode as
+diagnostic or research infrastructure until separate agentic benchmarks prove
+tool-use reliability.
 
 ## Progress Tracking
 
 Track current research status, evidence, and next actions in `/home/liu.shu/knowledge-vault/02-research/2026-05-20-qwen25-vllm-qwen-code-tools/index.md`.
 
-## 1. Launch The 7B Development Topology
+## 1. Launch The 7B Diagnostic Topology
 
 From any login-node directory:
 
@@ -33,7 +40,7 @@ For a shorter public-GPU fallback, override the partition and walltime:
 PARTITION=gpu-short SLURM_TIME=01:00:00 source /home/liu.shu/env_sh/gpu_2node_qwen25coder7b_interactive.sh
 ```
 
-The default uses `multigpu` for longer coding sessions while still requesting only one
+The default uses `multigpu` for longer diagnostic sessions while still requesting only one
 V100 per node:
 
 ```bash
@@ -57,7 +64,74 @@ As a last-resort endpoint-specific debugging fallback, run two independent 1-nod
 and test each endpoint separately. Defer cross-node orchestration checks until a real
 2-node allocation is available.
 
-## 2. Discover Slurm Endpoints
+## 2. Launch The 14B TP=2 Benchmark Topology
+
+The 14B path is a benchmark candidate, not the default direct-generation baseline.
+Keep the 7B topology as default until 14B beats it on the same endpoint, worker,
+and MBPP gates without unacceptable latency or stability regressions.
+
+From any login-node directory:
+
+```bash
+source /home/liu.shu/env_sh/gpu_2node_qwen25coder14b_tp2_interactive.sh
+```
+
+Defaults:
+
+- Slurm request: `--partition=multigpu --nodes=2 --ntasks=2 --ntasks-per-node=1 --gres=gpu:v100-sxm2:2 --time=12:00:00 --cpus-per-task=8 --mem=32G`.
+- Model: `Qwen/Qwen2.5-Coder-14B-Instruct`.
+- Topology: two independent endpoints, one per node, each using two local V100s with `TENSOR_PARALLEL_SIZE=2`.
+- Context and serving knobs: `MAX_MODEL_LEN=16384 TENSOR_PARALLEL_SIZE=2 GPU_MEMORY_UTILIZATION=0.86 DTYPE=auto`.
+- vLLM env: `/projects/aclab/liu.shu/envs/qwen25-vllm092-torch27-cu126/bin/python`.
+- Ports: control `8011`, worker `8012`.
+- State file: `/home/liu.shu/.current_gpu_2node_qwen25coder14b_job`.
+
+Validate the 14B endpoints inside the allocation:
+
+```bash
+scripts/validate_vllm_endpoints.py \
+  --timeout 60 \
+  --model Qwen/Qwen2.5-Coder-14B-Instruct \
+  --expected-max-model-len 16384 \
+  --json
+```
+
+Run the deterministic worker checks and MBPP gates:
+
+```bash
+scripts/check_hybrid_worker.py
+
+scripts/run_mbpp_single_file_eval.py \
+  --run-id mbpp-3-14b-tp2 \
+  --limit 3 \
+  --model Qwen/Qwen2.5-Coder-14B-Instruct \
+  --expected-model Qwen/Qwen2.5-Coder-14B-Instruct
+
+scripts/run_mbpp_single_file_eval.py \
+  --run-id mbpp-25-14b-tp2 \
+  --limit 25 \
+  --model Qwen/Qwen2.5-Coder-14B-Instruct \
+  --expected-model Qwen/Qwen2.5-Coder-14B-Instruct
+
+scripts/aggregate_mbpp_single_file_eval.py \
+  /projects/aclab/liu.shu/model-cache/tmp/qwen_mbpp_single_file_eval/mbpp-25-14b-tp2
+```
+
+If 16k startup fails from V100 memory pressure, retry the same launcher with
+`MAX_MODEL_LEN=8192` as a second trial. Do not start 14B testing at 32k.
+
+If one node hangs during TP=2 initialization while the other node reaches
+`/v1/models`, exclude the suspect node on the next allocation. For example, a
+14B TP=2 trial on `d1013` hung before NCCL/P2P setup while `d1012` served
+successfully:
+
+```bash
+SLURM_EXCLUDE=d1013 source /home/liu.shu/env_sh/gpu_2node_qwen25coder14b_tp2_interactive.sh
+```
+
+The 14B MBPP25 benchmark passed twice on the same gate: 25/25 on the first run and 25/25 on rerun.
+
+## 3. Discover Slurm Endpoints
 
 Run inside the active two-node Slurm allocation:
 
@@ -74,7 +148,7 @@ CONTROL_ENDPOINT=http://127.0.0.1:8011/v1
 WORKER_ENDPOINT=http://d1011:8012/v1
 ```
 
-## 3. Validate vLLM
+## 4. Validate vLLM
 
 Validate both endpoints. The worker URL is auto-discovered from `SLURM_JOB_NODELIST` when available.
 
@@ -94,8 +168,14 @@ For automation:
 $HYBRID_AGENTS_REPO_ROOT/scripts/validate_vllm_endpoints.py --timeout 60 --json
 ```
 
-For the full single-worker reliability gate, run the proxy stop-condition checks,
-validate vLLM, then run the live worker smoke:
+For deterministic direct-worker safety checks that do not require vLLM:
+
+```bash
+$HYBRID_AGENTS_REPO_ROOT/scripts/check_hybrid_worker.py
+```
+
+For the older Qwen Code diagnostic gate, run the proxy stop-condition checks,
+validate vLLM, then run the live smoke:
 
 ```bash
 $HYBRID_AGENTS_REPO_ROOT/scripts/check_proxy_stop_conditions.py
@@ -110,12 +190,49 @@ The smoke gate requires `summary.json` to report `ok: true`, `qwen_returncode: 0
 no timeout, no disallowed paths, a non-empty patch, and passing tests. A patch created
 before a Qwen timeout is still a failed smoke.
 
-Acceptance: both `/v1/models` endpoints work, simple chat returns `ok`, worker smoke
-reports `ok: true`, and no request times out.
+Acceptance: both `/v1/models` endpoints work, simple chat returns `ok`, the smoke
+reports `ok: true`, and no request times out. This validates only the narrow
+proxy-forced single-file path; it does not qualify Qwen for production subagent
+delegation or multi-file implementation work.
 
-## 4. Run One Isolated Worker Task
+## 5. Run One Isolated Direct Worker Task
 
-The worker runner never edits the target repo directly. It creates an isolated workspace, runs Qwen Code there, then writes artifacts under `/tmp/hybrid_agent_tasks` by default. Each worker run or patch review also appends one JSONL registry record to `/tmp/hybrid_agent_tasks/runs.jsonl` unless `--run-registry` overrides it.
+The direct worker never edits the target repo. It creates an isolated workspace,
+asks vLLM for complete replacement content for one target file or up to three
+explicit target files, writes only in the isolated workspace, runs optional tests
+there, and emits artifacts for Codex review. Default `--output-protocol auto`
+uses plain complete-file output; multi-file auto runs sequential plain calls and
+updates the workspace after each generated file. Use `--output-protocol json`
+only for explicit atomic multi-file JSON generation. If the target repo has
+uncommitted changes, the worker copies the current working tree instead of a
+detached `HEAD` worktree so reviewer-added tests participate in verification.
+
+```bash
+scripts/hybrid-worker \
+  --repo /path/to/repo \
+  --endpoint http://127.0.0.1:8011/v1 \
+  --task "Implement the requested small change." \
+  --target-file src/example.py \
+  --allowed-path "src/**" \
+  --test-command "pytest tests/test_example.py"
+```
+
+Artifacts:
+
+- `task.md`: the submitted task.
+- `prompt.md`: exact direct-generation prompt.
+- `selected_context.json`: target file content supplied to the model.
+- `raw_response.json`, `raw_responses.json`, `raw_model_response.txt`, and
+  `raw_model_responses.json`: model output.
+- `generated_files/` and `generated_files.json`: generated complete file content.
+- `workspace/`: isolated workspace containing generated changes.
+- `diff.patch`: generated patch for review.
+- `test.log`: test command output, when tests are provided.
+- `summary.json`: stable machine-readable status.
+
+## 6. Run One Isolated Qwen Code Diagnostic Task
+
+The worker runner never edits the target repo directly. It creates an isolated workspace, runs Qwen Code there, then writes artifacts under `/tmp/hybrid_agent_tasks` by default. Each worker run or patch review also appends one JSONL registry record to `/tmp/hybrid_agent_tasks/runs.jsonl` unless `--run-registry` overrides it. Treat these runs as diagnostics and artifact-producing probes, not production subagent delegation.
 
 ```bash
 scripts/run_worker_task.py \
@@ -169,7 +286,8 @@ scripts/run_worker_task.py \
 The runner defaults to `--approval-mode yolo` because headless Qwen Code may refuse some
 tools in `auto-edit` mode with a warning that automatic tool execution requires YOLO mode.
 The workspace is isolated and the patch gate still controls what can be applied to the
-target repo.
+target repo. Keep Qwen-generated patches review-only unless a future compatibility proof
+promotes this path back into the active workflow.
 
 The runner also caps Qwen Code output with `QWEN_CODE_MAX_OUTPUT_TOKENS=1024` by default.
 Set `QWEN_CODE_MAX_OUTPUT_TOKENS` in the environment or pass
@@ -181,11 +299,11 @@ tool-use prompt plus requested completion budget exceeded the served vLLM contex
 window. vLLM effectively requires `prompt_tokens + requested_max_tokens <=
 max_model_len`; with the old `MAX_MODEL_LEN=8192`, Qwen Code's large tool prompt and
 output budget produced HTTP 400 before generation. The current mitigation is serving
-the 7B development topology with `MAX_MODEL_LEN=16384` and keeping the runner-local
+the 7B diagnostic topology with `MAX_MODEL_LEN=16384` and keeping the runner-local
 Qwen output budget capped at `1024` by default. For larger tasks, first confirm the
 served `max_model_len` and available token budget before raising the cap.
 
-## 5. Review Or Apply A Patch
+## 7. Review Or Apply A Qwen Code Diagnostic Patch
 
 By default the worker runner only returns artifacts. To review a patch against an
 allowed-path gate without running Qwen Code:
@@ -233,13 +351,13 @@ env -u http_proxy -u https_proxy -u ftp_proxy \
   --output-format text
 ```
 
-For 32B final validation, use `--model Qwen/Qwen2.5-Coder-32B-Instruct` and validate
+For optional 32B research, use `--model Qwen/Qwen2.5-Coder-32B-Instruct` and validate
 with `--expected-max-model-len 32768`.
 
-## 32B Scale-Up And Final Validation
+## 32B Scale-Up Research
 
-After the 7B development path passes endpoint, proxy, and smoke-gate checks, launch the
-existing 32B topology:
+After the 7B diagnostic path passes endpoint, proxy, and smoke-gate checks, the
+existing 32B topology may be launched for research:
 
 ```bash
 source scripts/multigpu_2node_qwen25coder_interactive.sh
@@ -248,6 +366,10 @@ source scripts/multigpu_2node_qwen25coder_interactive.sh
 The 32B launcher keeps the existing defaults: `Qwen/Qwen2.5-Coder-32B-Instruct`,
 `MAX_MODEL_LEN=32768`, `TENSOR_PARALLEL_SIZE=4`, and 4 V100 SXM2 GPUs per node on
 `multigpu`.
+
+Do not treat a 32B launch or smoke as a production delegation milestone without a fresh
+compatibility proof that covers multi-file edits, real tool calls, timeouts, patch
+validity, and repeatable test execution.
 
 ## Tool-Choice Proxy Experiment
 
@@ -265,7 +387,7 @@ Then point Qwen Code or the worker runner at:
 http://127.0.0.1:18011/v1
 ```
 
-For the standard worker path, prefer the startup helper. It starts the proxy, waits for
+For the standard diagnostic path, prefer the startup helper. It starts the proxy, waits for
 `/v1/models`, writes a pid and log under `/tmp/$USER`, and prints the endpoint value:
 
 ```bash

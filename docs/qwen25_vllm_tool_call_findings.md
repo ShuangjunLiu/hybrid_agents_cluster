@@ -23,6 +23,22 @@ The failure mode is request/prompt/model behavior when tool choice is left to `a
 - Qwen2.5-Coder follows that text format and vLLM returns it as `message.content`.
 - Because `message.tool_calls` is empty, Qwen Code never executes the apparent call.
 
+## Current Workflow Status
+
+Qwen2.5-Coder 7B/vLLM is retired as an active implementation subagent. The validated
+positive path is limited to narrow proxy-forced single-file smoke behavior with artifact
+review. A later artifact-only multi-file exercise failed:
+
+- Proxy path: API 400 context-budget failures, timeout loops, and an incomplete or
+  invalid one-file patch instead of a reliable multi-file result.
+- No-proxy path: the model returned plain Markdown instead of executable OpenAI
+  tool calls, so Qwen Code did not perform the requested edits.
+
+Keep the runner, proxy, and vLLM launchers for endpoint validation, parser experiments,
+diagnostics, and artifact review. Use Codex-native subagents for implementation, docs,
+testing, and repository exploration until a future model/runtime combination proves
+stable on broader tasks.
+
 ## Direct API Probes
 
 `tool_choice: "auto"` reproduced the issue outside Qwen Code:
